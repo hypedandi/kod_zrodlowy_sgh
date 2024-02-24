@@ -1,1 +1,133 @@
-Budowa tabeli - warstwa BRONZE
+# Budowa tabeli - warstwa BRONZE
+%sql
+-- tabela ADA
+CREATE TABLE IF NOT EXISTS ADA_bronze (
+  id INTEGER NOT NULL,
+  data_time DATE,
+  open DOUBLE,
+  high DOUBLE,
+  low DOUBLE,
+  close DOUBLE,
+  volume DOUBLE
+) 
+USING DELTA TBLPROPERTIES (
+  delta.autooptimize.optimizewrite = TRUE,
+  delta.autooptimize.autocompact = TRUE
+);
+%sql
+-- tabela BTC
+CREATE TABLE IF NOT EXISTS BTC_bronze (
+  id INTEGER NOT NULL,
+  data_time DATE,
+  open DOUBLE,
+  high DOUBLE,
+  low DOUBLE,
+  close DOUBLE,
+  volume DOUBLE
+) 
+USING DELTA TBLPROPERTIES (
+  delta.autooptimize.optimizewrite = TRUE,
+  delta.autooptimize.autocompact = TRUE
+);
+# Ładowanie surowych danych do tabeli - warstwa BRRONZE
+# tabela 1 Cardano (ADA)
+bronze_ADA = (spark.readStream
+                        .format('cloudFiles')
+                        .option('cloudFiles.format','csv')
+                        .option('cloudFiles.maxFilesPerTrigger', '1')                  
+                        .load('adl://sghdatalake.azuredatalakestore.net/AAVEUSDT_D1.csv')
+                        )
+(bronze_ADA.writeStream
+                .option('checkpointLocation', 'adl://sghdatalake.azuredatalakestore.net/checkpoint_bronzeADA')
+                .option('mergeSchema', 'true')
+                .tavle('ADA_bronze'))
+# tabela 1 Bitcoin (BTC)
+bronze_BTC = (spark.readStream
+                        .format('cloudFiles')
+                        .option('cloudFiles.format','csv')
+                        .option('cloudFiles.maxFilesPerTrigger', '1')                  
+                        .load('adl://sghdatalake.azuredatalakestore.net/BTCUSDT_W1.csv')
+                        )
+(bronze_BTC.writeStream
+                .option('checkpointLocation', 'adl://sghdatalake.azuredatalakestore.net/checkpoint_bronzeBTC')
+                .option('mergeSchema', 'true')
+                .tavle('BTC_bronze'))
+
+# Transformacje danych - warstwa SILVER
+# tabela 1 Cardano (ADA)
+from pyspark.sql.functions import col, lit, round, monotonically_increasing_id
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.getOrCreate()
+
+(spark.read
+    .table('kryptowaluty')
+    .withColumn("high_and_open_dif", round(col("high") - col("open"), 4))
+    .withColumn("high_and_low_dif", round(col("high") - col("low"), 4))
+    .withColumn("open_and_close_dif", round(col("open") - col("close"), 4))
+    .withColumn("name", lit("ADA"))
+    .withColumn("id", monotonically_increasing_id()) 
+    .write
+    .option('checkpointLocation', 'dbfs:/user/hive/warehouse/kryptowaluty/checkpoint_sliver')
+    .saveAsTable('kryptowaluty_silver1'))
+
+ADA = spark.read.table('kryptowaluty_gold')
+(ADA
+    .withColumnRenamed("datetime", "Czas")
+    .withColumnRenamed("open", "Otwarcie")
+    .withColumnRenamed("high", "Max")
+    .withColumnRenamed("low", "Min")
+    .withColumnRenamed("close", "Zamknięcie")
+    .withColumnRenamed("volume", "Obrót")
+    .withColumnRenamed("high_and_open_dif", "Diff_Max_Otw")
+    .withColumnRenamed("high_and_low_dif", "Diff_Max_Min")
+    .withColumnRenamed("open_and_close_dif", "Diff_Otw_Zam")
+    .withColumnRenamed("name", "Nazwa")
+    .drop("id")
+    .write
+    .saveAsTable('ADA_silver')
+)
+# tabela 2 Bitcoin (BTC)
+(spark.read
+    .table('bitcoin')
+    .withColumn("high_and_open_dif", round(col("high") - col("open"), 4))
+    .withColumn("high_and_low_dif", round(col("high") - col("low"), 4))
+    .withColumn("open_and_close_dif", round(col("open") - col("close"), 4))
+    .withColumn("name", lit("BTC"))
+    .withColumn("id", monotonically_increasing_id()) 
+    .write
+    .option('checkpointLocation', 'dbfs:/user/hive/warehouse/kryptowaluty/checkpoint_sliver2')
+    .saveAsTable('kryptowaluty_silver2'))
+
+BTC = spark.read.table('kryptowaluty_silver2')
+(ADA
+    .withColumnRenamed("datetime", "Czas")
+    .withColumnRenamed("open", "Otwarcie")
+    .withColumnRenamed("high", "Max")
+    .withColumnRenamed("low", "Min")
+    .withColumnRenamed("close", "Zamknięcie")
+    .withColumnRenamed("volume", "Obrót")
+    .withColumnRenamed("high_and_open_dif", "Diff_Max_Otw")
+    .withColumnRenamed("high_and_low_dif", "Diff_Max_Min")
+    .withColumnRenamed("open_and_close_dif", "Diff_Otw_Zam")
+    .withColumnRenamed("name", "Nazwa")
+    .drop("id")
+    .write
+    .saveAsTable('BTC_silver')
+)
+
+# Łączenie tabel w jedną - warstwa GOLD
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.getOrCreate()
+
+silver1 = spark.read.table("ADA_silver")
+silver2 = spark.read.table("BTC_silver")
+
+merged_df = silver1.union(silver2)
+
+# Zapisz do tabeli 'kryptowaluty_gold'
+merged_df.write.mode("append").saveAsTable('kryptowaluty_gold')
+
+%sql
+select * from kryptowaluty_gold
